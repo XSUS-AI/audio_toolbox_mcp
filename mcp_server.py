@@ -7,9 +7,12 @@ import tempfile
 import logging
 import logging.handlers
 import numpy as np
+from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Optional, Union, List, Dict, Any, Literal, Tuple
 from pathlib import Path
+import soundfile as sf
+import librosa
 
 from pydantic import BaseModel, Field, field_validator
 from mcp.server.fastmcp import FastMCP, Context, Image
@@ -59,6 +62,61 @@ from src.audio_toolbox.transform import (
 from src.audio_toolbox.separate import (
     SeparationRequest, TwoStemSeparationRequest
 )
+
+# Audio Registry for in-memory audio data management
+class AudioRegistry:
+    """Registry for storing audio data with access via IDs."""
+    
+    def __init__(self):
+        self.audio_registry = {}  # Maps IDs to (audio_data, sample_rate, metadata)
+        self.counter = 0  # For generating unique IDs
+    
+    def register(self, audio_data, sample_rate, name=None, metadata=None):
+        """Register audio data and return a unique ID."""
+        if name and name in self.audio_registry:
+            # If named entry exists, replace it
+            audio_id = name
+        else:
+            # Generate a unique ID if no name provided
+            self.counter += 1
+            audio_id = name or f"audio_{self.counter}"
+        
+        self.audio_registry[audio_id] = {
+            "audio_data": audio_data,
+            "sample_rate": sample_rate,
+            "metadata": metadata or {},
+            "created": datetime.now().isoformat()
+        }
+        return audio_id
+    
+    def get(self, audio_id):
+        """Retrieve audio data by ID."""
+        if audio_id not in self.audio_registry:
+            raise ValueError(f"No audio data found with ID '{audio_id}'")
+        return self.audio_registry[audio_id]
+    
+    def list_entries(self):
+        """List all registered audio entries with metadata."""
+        return {
+            audio_id: {
+                "sample_rate": entry["sample_rate"],
+                "created": entry["created"],
+                "metadata": entry["metadata"]
+            }
+            for audio_id, entry in self.audio_registry.items()
+        }
+    
+    def remove(self, audio_id):
+        """Remove audio data from registry."""
+        if audio_id in self.audio_registry:
+            del self.audio_registry[audio_id]
+            return True
+        return False
+    
+    def clear(self):
+        """Clear all audio data from registry."""
+        self.audio_registry.clear()
+        self.counter = 0
 
 # Base Models for Requests and Responses
 class AudioFileRequest(BaseModel):
@@ -124,26 +182,50 @@ class AudioOutputResponse(BaseModel):
     sample_rate: int = Field(..., description="Sample rate of the audio in Hz")
     format: str = Field("wav", description="Format of the audio data")
 
-class SeparationResponse(BaseModel):
-    """Response with audio separation results."""
-    stems: Dict[str, str] = Field(..., description="Dictionary of stem names to base64 encoded audio data")
+# Audio Registry specific models
+class AudioRegistryEntryInfo(BaseModel):
+    """Information about an entry in the audio registry."""
+    audio_id: str = Field(..., description="ID of the registered audio data")
+    sample_rate: int = Field(..., description="Sample rate of the audio")
+    duration: Optional[float] = Field(None, description="Duration in seconds")
+    created: str = Field(..., description="ISO timestamp when the audio was registered")
+    metadata: Dict[str, Any] = Field({}, description="Additional metadata about the audio")
+
+class AudioRegistryListResponse(BaseModel):
+    """Response listing all entries in the audio registry."""
+    entries: List[AudioRegistryEntryInfo] = Field(..., description="List of registry entries")
+
+class AudioRegistryRequest(BaseModel):
+    """Request to retrieve audio from the registry."""
+    audio_id: str = Field(..., description="ID of the registered audio data")
+
+class RegisteredAudioResponse(BaseModel):
+    """Response with a reference to registered audio data."""
+    audio_id: str = Field(..., description="ID of the registered audio data")
+    sample_rate: int = Field(..., description="Sample rate of the audio in Hz")
+    duration: Optional[float] = Field(None, description="Duration of the audio in seconds")
+
+# Updated separation response model with registry references
+class SeparationRegistryResponse(BaseModel):
+    """Response with audio separation results as registry references."""
+    stem_ids: Dict[str, str] = Field(..., description="Dictionary of stem names to registry IDs")
     sample_rate: int = Field(..., description="Sample rate of the stems in Hz")
 
-class TwoStemResponse(BaseModel):
-    """Response with two-stem separation results."""
-    target_stem: str = Field(..., description="Base64 encoded target stem audio data")
-    everything_else: str = Field(..., description="Base64 encoded remainder audio data")
+class VocalsRegistryResponse(BaseModel):
+    """Response with vocals separation results as registry references."""
+    vocals_id: str = Field(..., description="Registry ID for vocals audio")
+    vocals_path: str = Field(..., description="Path to saved vocals file")
+    accompaniment_id: str = Field(..., description="Registry ID for accompaniment audio")
+    accompaniment_path: str = Field(..., description="Path to saved accompaniment file")
     sample_rate: int = Field(..., description="Sample rate of the stems in Hz")
 
-class VocalsResponse(BaseModel):
-    """Response with vocals separation results."""
-    vocals: str = Field(..., description="Base64 encoded vocals audio data")
-    accompaniment: str = Field(..., description="Base64 encoded accompaniment audio data")
+class TwoStemRegistryResponse(BaseModel):
+    """Response with two-stem separation results as registry references."""
+    target_stem_id: str = Field(..., description="Registry ID for target stem audio")
+    target_stem_path: str = Field(..., description="Path to saved target stem file")
+    remainder_id: str = Field(..., description="Registry ID for remainder audio")
+    remainder_path: str = Field(..., description="Path to saved remainder file")
     sample_rate: int = Field(..., description="Sample rate of the stems in Hz")
-
-class EffectChainRequest(BaseModel):
-    """Request to apply a chain of effects."""
-    effect_chain: List[Dict[str, Any]] = Field(..., description="List of effects and their parameters")
 
 # Create an MCP server
 mcp = FastMCP("Audio Toolbox")
@@ -151,13 +233,18 @@ mcp = FastMCP("Audio Toolbox")
 # Define the application state and lifespan
 class AppContext:
     """Context for the audio processor."""
-    processor: AudioProcessor
+    def __init__(self):
+        self.processor = None
+        self.audio_registry = AudioRegistry()
+        self.output_dir = Path("output")
+        # Create output directory if it doesn't exist
+        self.output_dir.mkdir(exist_ok=True)
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> None:
     """Manage application lifecycle."""
     # Initialize on startup
-    context = AppContext(processor=None)
+    context = AppContext()
     try:
         yield context
     finally:
@@ -199,6 +286,85 @@ def decode_audio_data(audio_data_str: str) -> Tuple[np.ndarray, int]:
     
     return audio_data, sample_rate
 
+# Audio Registry Management Tools
+@mcp.tool()
+def list_audio_registry(ctx: Context) -> AudioRegistryListResponse:
+    """List all entries in the audio registry."""
+    registry = ctx.request_context.lifespan_context.audio_registry
+    entries_data = registry.list_entries()
+    
+    entries = []
+    for audio_id, info in entries_data.items():
+        # Get duration if available
+        duration = None
+        processor = ctx.request_context.lifespan_context.processor
+        if processor and audio_id == "current" and processor.audio_data is not None:
+            duration = processor.duration
+            
+        entries.append(AudioRegistryEntryInfo(
+            audio_id=audio_id,
+            sample_rate=info["sample_rate"],
+            duration=duration,
+            created=info["created"],
+            metadata=info["metadata"]
+        ))
+    
+    return AudioRegistryListResponse(entries=entries)
+
+@mcp.tool()
+def load_audio_from_registry(request: AudioRegistryRequest, ctx: Context) -> AudioInfoResponse:
+    """Load audio from the registry into the processor."""
+    try:
+        registry = ctx.request_context.lifespan_context.audio_registry
+        audio_entry = registry.get(request.audio_id)
+        
+        processor = AudioProcessor(
+            audio_data=audio_entry["audio_data"],
+            sample_rate=audio_entry["sample_rate"]
+        )
+        ctx.request_context.lifespan_context.processor = processor
+        
+        # Register as current
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata=audio_entry["metadata"]
+        )
+        
+        return AudioInfoResponse(
+            duration=processor.duration,
+            sample_rate=processor.sample_rate,
+            num_channels=processor.num_channels
+        )
+    except Exception as e:
+        logger.error(f"Error loading audio from registry: {str(e)}")
+        raise ValueError(f"Failed to load audio from registry: {str(e)}")
+
+@mcp.tool()
+def remove_from_audio_registry(request: AudioRegistryRequest, ctx: Context) -> AudioProcessingResponse:
+    """Remove an entry from the audio registry."""
+    registry = ctx.request_context.lifespan_context.audio_registry
+    if registry.remove(request.audio_id):
+        return AudioProcessingResponse(
+            success=True,
+            message=f"Removed audio with ID '{request.audio_id}' from registry"
+        )
+    return AudioProcessingResponse(
+        success=False,
+        message=f"No audio found with ID '{request.audio_id}'"
+    )
+
+@mcp.tool()
+def clear_audio_registry(ctx: Context) -> AudioProcessingResponse:
+    """Clear all entries from the audio registry."""
+    registry = ctx.request_context.lifespan_context.audio_registry
+    registry.clear()
+    return AudioProcessingResponse(
+        success=True,
+        message="Audio registry cleared"
+    )
+
 # Audio loading and info tools
 @mcp.tool()
 def load_audio_file(request: AudioFileRequest, ctx: Context) -> AudioInfoResponse:
@@ -207,6 +373,15 @@ def load_audio_file(request: AudioFileRequest, ctx: Context) -> AudioInfoRespons
         logger.info(f"Loading audio file: {request.file_path}")
         processor = AudioProcessor(request.file_path)
         ctx.request_context.lifespan_context.processor = processor
+        
+        # Register the loaded audio
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",  # Always use "current" for the active processor
+            metadata={"source_file": request.file_path}
+        )
         
         return AudioInfoResponse(
             duration=processor.duration,
@@ -226,6 +401,15 @@ def load_audio_data(request: AudioDataRequest, ctx: Context) -> AudioInfoRespons
         
         processor = AudioProcessor(audio_data=audio_data, sample_rate=sample_rate)
         ctx.request_context.lifespan_context.processor = processor
+        
+        # Register the loaded audio
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"source": "loaded_data"}
+        )
         
         return AudioInfoResponse(
             duration=processor.duration,
@@ -446,6 +630,15 @@ def apply_reverb(request: Optional[ReverbRequest] = None, ctx: Context = None) -
         logger.info("Applying reverb effect")
         processor.effects.reverb(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "reverb"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Reverb effect applied successfully"
@@ -467,6 +660,15 @@ def apply_delay(request: Optional[DelayRequest] = None, ctx: Context = None) -> 
         
         logger.info("Applying delay effect")
         processor.effects.delay(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "delay"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -490,6 +692,15 @@ def apply_chorus(request: Optional[ChorusRequest] = None, ctx: Context = None) -
         logger.info("Applying chorus effect")
         processor.effects.chorus(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "chorus"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Chorus effect applied successfully"
@@ -511,6 +722,15 @@ def apply_phaser(request: Optional[PhaserRequest] = None, ctx: Context = None) -
         
         logger.info("Applying phaser effect")
         processor.effects.phaser(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "phaser"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -534,6 +754,15 @@ def apply_compressor(request: Optional[CompressorRequest] = None, ctx: Context =
         logger.info("Applying compressor effect")
         processor.effects.compressor(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "compressor"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Compressor effect applied successfully"
@@ -555,6 +784,15 @@ def apply_distortion(request: Optional[DistortionRequest] = None, ctx: Context =
         
         logger.info("Applying distortion effect")
         processor.effects.distortion(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "distortion"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -578,6 +816,15 @@ def apply_gain(request: Optional[GainRequest] = None, ctx: Context = None) -> Au
         logger.info("Applying gain effect")
         processor.effects.gain(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "gain"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Gain effect applied successfully"
@@ -599,6 +846,15 @@ def apply_effect_pitch_shift(request: Optional[EffectPitchShiftRequest] = None, 
         
         logger.info("Applying pitch shift effect")
         processor.effects.pitch_shift(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "pitch_shift"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -622,6 +878,15 @@ def apply_lowpass_filter(request: Optional[FilterRequest] = None, ctx: Context =
         logger.info("Applying low-pass filter")
         processor.effects.lowpass_filter(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "lowpass_filter"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Low-pass filter applied successfully"
@@ -643,6 +908,15 @@ def apply_highpass_filter(request: Optional[FilterRequest] = None, ctx: Context 
         
         logger.info("Applying high-pass filter")
         processor.effects.highpass_filter(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "highpass_filter"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -666,6 +940,15 @@ def apply_noise_gate(request: Optional[NoiseGateRequest] = None, ctx: Context = 
         logger.info("Applying noise gate")
         processor.effects.noise_gate(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "noise_gate"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Noise gate applied successfully"
@@ -687,6 +970,15 @@ def apply_limiter(request: Optional[LimiterRequest] = None, ctx: Context = None)
         
         logger.info("Applying limiter")
         processor.effects.limiter(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "limiter"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -713,6 +1005,15 @@ def apply_effect_chain(request: EffectChainRequest, ctx: Context = None) -> Audi
         chain_request = ChainRequest(effects=request.effect_chain)
         processor.effects.chain(chain_request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "effect_chain"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message=f"Effect chain with {len(request.effect_chain)} effects applied successfully"
@@ -736,6 +1037,15 @@ def transform_time_stretch(request: Optional[TimeStretchRequest] = None, ctx: Co
         logger.info("Applying time stretch transformation")
         processor.transform.time_stretch(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "time_stretch"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Time stretch transformation applied successfully"
@@ -757,6 +1067,15 @@ def transform_pitch_shift(request: Optional[TransformPitchShiftRequest] = None, 
         
         logger.info("Applying pitch shift transformation")
         processor.transform.pitch_shift(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "pitch_shift"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -780,6 +1099,15 @@ def transform_time_and_pitch(request: Optional[TimeAndPitchRequest] = None, ctx:
         logger.info("Applying time and pitch transformation")
         processor.transform.time_and_pitch(request)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "time_and_pitch"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Time and pitch transformation applied successfully"
@@ -801,6 +1129,15 @@ def transform_resample(request: Optional[ResampleRequest] = None, ctx: Context =
         
         logger.info(f"Resampling audio to {request.target_sample_rate if request else 'default'} Hz")
         processor.transform.resample(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "resample"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -824,6 +1161,15 @@ def transform_normalize(target_db: float = -1.0, ctx: Context = None) -> AudioPr
         logger.info(f"Normalizing audio to {target_db} dB")
         processor.transform.normalize(target_db=target_db)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "normalize"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message=f"Audio normalized to {target_db} dB successfully"
@@ -845,6 +1191,15 @@ def transform_reverse(ctx: Context = None) -> AudioProcessingResponse:
         
         logger.info("Reversing audio")
         processor.transform.reverse()
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "reverse"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -868,6 +1223,15 @@ def transform_fade_in(duration_seconds: float = 1.0, ctx: Context = None) -> Aud
         logger.info(f"Applying {duration_seconds}s fade-in")
         processor.transform.fade_in(duration_seconds=duration_seconds)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "fade_in"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message=f"Fade-in of {duration_seconds}s applied successfully"
@@ -889,6 +1253,15 @@ def transform_fade_out(duration_seconds: float = 1.0, ctx: Context = None) -> Au
         
         logger.info(f"Applying {duration_seconds}s fade-out")
         processor.transform.fade_out(duration_seconds=duration_seconds)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "fade_out"}
+        )
         
         return AudioProcessingResponse(
             success=True,
@@ -916,6 +1289,15 @@ def transform_trim_silence(
         logger.info(f"Trimming silence with threshold {threshold_db} dB")
         processor.transform.trim_silence(threshold_db=threshold_db, pad_seconds=pad_seconds)
         
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"transform": "trim_silence"}
+        )
+        
         return AudioProcessingResponse(
             success=True,
             message="Silence trimmed successfully"
@@ -929,7 +1311,7 @@ def transform_trim_silence(
 
 # Audio source separation tools
 @mcp.tool()
-def separate_stems(request: Optional[SeparationRequest] = None, ctx: Context = None) -> SeparationResponse:
+def separate_stems(request: Optional[SeparationRequest] = None, ctx: Context = None) -> SeparationRegistryResponse:
     """Separate audio into multiple stems (vocals, drums, bass, etc.)."""
     try:
         processor = ctx.request_context.lifespan_context.processor
@@ -939,13 +1321,27 @@ def separate_stems(request: Optional[SeparationRequest] = None, ctx: Context = N
         logger.info("Separating audio into stems")
         stems = processor.separate.separate_stems(request)
         
-        # Encode each stem as base64
-        encoded_stems = {}
-        for name, audio in stems.items():
-            encoded_stems[name] = encode_audio_data(audio, processor.sample_rate)
+        # Register each stem in the registry and save to file
+        registry = ctx.request_context.lifespan_context.audio_registry
+        stem_ids = {}
         
-        return SeparationResponse(
-            stems=encoded_stems,
+        for name, audio in stems.items():
+            # Register in registry
+            stem_id = registry.register(
+                audio_data=audio,
+                sample_rate=processor.sample_rate,
+                name=name,
+                metadata={"type": "stem", "stem_name": name}
+            )
+            stem_ids[name] = stem_id
+            
+            # Save to file
+            output_path = ctx.request_context.lifespan_context.output_dir / f"{name}.wav"
+            stem_processor = AudioProcessor(audio_data=audio, sample_rate=processor.sample_rate)
+            stem_processor.save(str(output_path))
+        
+        return SeparationRegistryResponse(
+            stem_ids=stem_ids,
             sample_rate=processor.sample_rate
         )
     except Exception as e:
@@ -953,7 +1349,7 @@ def separate_stems(request: Optional[SeparationRequest] = None, ctx: Context = N
         raise ValueError(f"Failed to separate stems: {str(e)}")
 
 @mcp.tool()
-def separate_vocals(request: Optional[TwoStemSeparationRequest] = None, ctx: Context = None) -> VocalsResponse:
+def separate_vocals(request: Optional[TwoStemSeparationRequest] = None, ctx: Context = None) -> VocalsRegistryResponse:
     """Separate vocals from the audio."""
     try:
         processor = ctx.request_context.lifespan_context.processor
@@ -963,9 +1359,38 @@ def separate_vocals(request: Optional[TwoStemSeparationRequest] = None, ctx: Con
         logger.info("Separating vocals")
         vocals, accompaniment = processor.separate.vocals(request)
         
-        return VocalsResponse(
-            vocals=encode_audio_data(vocals, processor.sample_rate),
-            accompaniment=encode_audio_data(accompaniment, processor.sample_rate),
+        # Register both stems in the registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        vocals_id = registry.register(
+            audio_data=vocals,
+            sample_rate=processor.sample_rate,
+            name="vocals",
+            metadata={"type": "stem", "content": "vocals"}
+        )
+        
+        accompaniment_id = registry.register(
+            audio_data=accompaniment,
+            sample_rate=processor.sample_rate,
+            name="accompaniment",
+            metadata={"type": "stem", "content": "accompaniment"}
+        )
+        
+        # Also save to files for convenience
+        output_dir = ctx.request_context.lifespan_context.output_dir
+        vocals_path = output_dir / "vocals.wav"
+        accompaniment_path = output_dir / "accompaniment.wav"
+        
+        vocals_processor = AudioProcessor(audio_data=vocals, sample_rate=processor.sample_rate)
+        vocals_processor.save(str(vocals_path))
+        
+        accompaniment_processor = AudioProcessor(audio_data=accompaniment, sample_rate=processor.sample_rate)
+        accompaniment_processor.save(str(accompaniment_path))
+        
+        return VocalsRegistryResponse(
+            vocals_id=vocals_id,
+            vocals_path=str(vocals_path),
+            accompaniment_id=accompaniment_id,
+            accompaniment_path=str(accompaniment_path),
             sample_rate=processor.sample_rate
         )
     except Exception as e:
@@ -973,7 +1398,7 @@ def separate_vocals(request: Optional[TwoStemSeparationRequest] = None, ctx: Con
         raise ValueError(f"Failed to separate vocals: {str(e)}")
 
 @mcp.tool()
-def separate_drums(request: Optional[TwoStemSeparationRequest] = None, ctx: Context = None) -> TwoStemResponse:
+def separate_drums(request: Optional[TwoStemSeparationRequest] = None, ctx: Context = None) -> TwoStemRegistryResponse:
     """Separate drums from the audio."""
     try:
         processor = ctx.request_context.lifespan_context.processor
@@ -988,11 +1413,40 @@ def separate_drums(request: Optional[TwoStemSeparationRequest] = None, ctx: Cont
             # Make sure the stem is set to drums
             request.stem = "drums"
             
-        drums, accompaniment = processor.separate.two_stems(request)
+        drums, other = processor.separate.two_stems(request)
         
-        return TwoStemResponse(
-            target_stem=encode_audio_data(drums, processor.sample_rate),
-            everything_else=encode_audio_data(accompaniment, processor.sample_rate),
+        # Register both stems in the registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        drums_id = registry.register(
+            audio_data=drums,
+            sample_rate=processor.sample_rate,
+            name="drums",
+            metadata={"type": "stem", "content": "drums"}
+        )
+        
+        other_id = registry.register(
+            audio_data=other,
+            sample_rate=processor.sample_rate,
+            name="other",
+            metadata={"type": "stem", "content": "other"}
+        )
+        
+        # Also save to files for convenience
+        output_dir = ctx.request_context.lifespan_context.output_dir
+        drums_path = output_dir / "drums.wav"
+        other_path = output_dir / "other.wav"
+        
+        drums_processor = AudioProcessor(audio_data=drums, sample_rate=processor.sample_rate)
+        drums_processor.save(str(drums_path))
+        
+        other_processor = AudioProcessor(audio_data=other, sample_rate=processor.sample_rate)
+        other_processor.save(str(other_path))
+        
+        return TwoStemRegistryResponse(
+            target_stem_id=drums_id,
+            target_stem_path=str(drums_path),
+            remainder_id=other_id,
+            remainder_path=str(other_path),
             sample_rate=processor.sample_rate
         )
     except Exception as e:
@@ -1000,7 +1454,7 @@ def separate_drums(request: Optional[TwoStemSeparationRequest] = None, ctx: Cont
         raise ValueError(f"Failed to separate drums: {str(e)}")
 
 @mcp.tool()
-def separate_bass(request: Optional[TwoStemSeparationRequest] = None, ctx: Context = None) -> TwoStemResponse:
+def separate_bass(request: Optional[TwoStemSeparationRequest] = None, ctx: Context = None) -> TwoStemRegistryResponse:
     """Separate bass from the audio."""
     try:
         processor = ctx.request_context.lifespan_context.processor
@@ -1015,11 +1469,40 @@ def separate_bass(request: Optional[TwoStemSeparationRequest] = None, ctx: Conte
             # Make sure the stem is set to bass
             request.stem = "bass"
             
-        bass, accompaniment = processor.separate.two_stems(request)
+        bass, other = processor.separate.two_stems(request)
         
-        return TwoStemResponse(
-            target_stem=encode_audio_data(bass, processor.sample_rate),
-            everything_else=encode_audio_data(accompaniment, processor.sample_rate),
+        # Register both stems in the registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        bass_id = registry.register(
+            audio_data=bass,
+            sample_rate=processor.sample_rate,
+            name="bass",
+            metadata={"type": "stem", "content": "bass"}
+        )
+        
+        other_id = registry.register(
+            audio_data=other,
+            sample_rate=processor.sample_rate,
+            name="other",
+            metadata={"type": "stem", "content": "other"}
+        )
+        
+        # Also save to files for convenience
+        output_dir = ctx.request_context.lifespan_context.output_dir
+        bass_path = output_dir / "bass.wav"
+        other_path = output_dir / "other.wav"
+        
+        bass_processor = AudioProcessor(audio_data=bass, sample_rate=processor.sample_rate)
+        bass_processor.save(str(bass_path))
+        
+        other_processor = AudioProcessor(audio_data=other, sample_rate=processor.sample_rate)
+        other_processor.save(str(other_path))
+        
+        return TwoStemRegistryResponse(
+            target_stem_id=bass_id,
+            target_stem_path=str(bass_path),
+            remainder_id=other_id,
+            remainder_path=str(other_path),
             sample_rate=processor.sample_rate
         )
     except Exception as e:
@@ -1036,6 +1519,15 @@ def apply_karaoke(request: Optional[TwoStemSeparationRequest] = None, ctx: Conte
         
         logger.info("Applying karaoke effect (vocal removal)")
         processor.separate.apply_vocal_removal(request)
+        
+        # Update the current audio in registry
+        registry = ctx.request_context.lifespan_context.audio_registry
+        registry.register(
+            audio_data=processor.audio_data,
+            sample_rate=processor.sample_rate,
+            name="current",
+            metadata={"effect": "karaoke"}
+        )
         
         return AudioProcessingResponse(
             success=True,

@@ -9,6 +9,7 @@ A comprehensive Python library for audio analysis and transformations, combining
 - **Source Separation**: Isolate vocals, drums, bass, and other components
 - **Audio Transformations**: Pitch shift, time stretch, resample
 - **AI Integration**: Use the AudioProcessor agent to run complex audio tasks
+- **Audio Registry**: Efficient in-memory management of audio assets with automatic file saving
 
 ## Installation
 
@@ -96,6 +97,17 @@ python mcp_server.py
 
 This server exposes all the audio toolbox functionality as tools that can be used by any MCP-compatible client.
 
+### Audio Registry
+
+The MCP server includes an Audio Registry system that efficiently manages audio data in memory using IDs instead of passing large base64 encoded strings. Key benefits:
+
+- **Token Efficiency**: Small IDs instead of large encoded strings
+- **Intuitive References**: Descriptive IDs for audio assets (e.g., "vocals", "drums")
+- **Automatic File Saving**: All processed audio components are saved to files
+- **State Management**: Easy tracking of audio processing history
+
+See `docs/audio_registry.md` for complete details on using the registry system.
+
 ## Examples
 
 Several example scripts are provided in the `examples` directory:
@@ -111,8 +123,10 @@ Several example scripts are provided in the `examples` directory:
 ```
 ├── agents/                      # Agent system prompts
 ├── docs/                        # Documentation
+│   └── audio_registry.md        # Audio registry documentation
 ├── examples/                    # Example scripts
 ├── logs/                        # Log files
+├── output/                      # Output directory for processed audio
 ├── src/                         # Source code
 │   └── audio_toolbox/           # Main package
 │       ├── __init__.py          # Package initialization
