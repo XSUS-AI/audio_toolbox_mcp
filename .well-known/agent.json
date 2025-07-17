@@ -1,0 +1,122 @@
+{
+  "name": "AudioProcessor",
+  "description": "A specialized agent for audio analysis, effects, transformations, and source separation.",
+  "url": "https://github.com/yourusername/audio_toolbox",
+  "provider": {
+    "name": "Audio Toolbox",
+    "url": "https://github.com/yourusername/audio_toolbox"
+  },
+  "version": "0.1.0",
+  "documentationUrl": "https://github.com/yourusername/audio_toolbox/docs",
+  "streaming": true,
+  "pushNotifications": false,
+  "stateTransitionHistory": true,
+  "authentication": {
+    "scheme": "None",
+    "credentials": []
+  },
+  "defaultInputModes": [
+    "text/plain"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "image/png"
+  ],
+  "skills": [
+    {
+      "id": "audio_analysis",
+      "name": "Audio Analysis",
+      "description": "Analyze audio files to extract features, generate visualizations, and interpret audio content.",
+      "tags": [
+        "audio",
+        "analysis",
+        "spectrograms",
+        "features"
+      ],
+      "examples": [
+        {
+          "input": "Generate a mel spectrogram for my audio file.",
+          "output": "Here's the mel spectrogram visualization for your audio. The brighter areas represent higher intensity across the frequency spectrum.",
+          "description": "Spectrogram generation example"
+        },
+        {
+          "input": "Can you detect the beats in this song?",
+          "output": "I've analyzed your audio and detected 120 beats at a tempo of 128 BPM.",
+          "description": "Beat detection example"
+        }
+      ]
+    },
+    {
+      "id": "audio_effects",
+      "name": "Audio Effects",
+      "description": "Apply professional audio effects like reverb, delay, compression, and EQ to audio files.",
+      "tags": [
+        "audio",
+        "effects",
+        "reverb",
+        "delay",
+        "compression"
+      ],
+      "examples": [
+        {
+          "input": "Add reverb to make this recording sound like it's in a large hall.",
+          "output": "I've applied a reverb effect with a large room size and moderate damping to simulate a hall environment. You can listen to the processed audio now.",
+          "description": "Reverb effect example"
+        },
+        {
+          "input": "Can you apply compression to make this vocal recording more even?",
+          "output": "I've applied compression with a threshold of -20dB and ratio of 4:1 to even out the dynamics of the vocal track.",
+          "description": "Compression effect example"
+        }
+      ]
+    },
+    {
+      "id": "audio_transformation",
+      "name": "Audio Transformation",
+      "description": "Transform audio characteristics like tempo, pitch, and sample rate without degrading quality.",
+      "tags": [
+        "audio",
+        "transformation",
+        "time stretch",
+        "pitch shift",
+        "resample"
+      ],
+      "examples": [
+        {
+          "input": "Speed up this audio by 20% without changing the pitch.",
+          "output": "I've time-stretched your audio to play 20% faster while preserving the original pitch. The new duration is 48 seconds.",
+          "description": "Time stretching example"
+        },
+        {
+          "input": "Pitch this vocal up by two semitones.",
+          "output": "I've shifted the pitch up by two semitones while maintaining the original duration. The vocal is now in a higher key.",
+          "description": "Pitch shifting example"
+        }
+      ]
+    },
+    {
+      "id": "audio_separation",
+      "name": "Audio Source Separation",
+      "description": "Separate audio into component parts like vocals, drums, bass, and other instruments.",
+      "tags": [
+        "audio",
+        "separation",
+        "vocals",
+        "drums",
+        "bass"
+      ],
+      "examples": [
+        {
+          "input": "Extract the vocals from this song.",
+          "output": "I've separated the vocals from the instrumental track. You can now access both the isolated vocals and the backing track separately.",
+          "description": "Vocal separation example"
+        },
+        {
+          "input": "Can you create a karaoke version of this track?",
+          "output": "I've created a karaoke version by removing the vocals while preserving the instrumental parts of the track.",
+          "description": "Karaoke creation example"
+        }
+      ]
+    }
+  ]
+}

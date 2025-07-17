@@ -1,0 +1,20 @@
+# Core libraries for our audio toolbox
+librosa>=0.11.0
+pedalboard>=0.9.0
+demucs>=4.0.0
+audioflux>=0.1.9
+pyaudioanalysis>=0.3.14
+
+# Additional dependencies
+numpy>=1.20.0
+scipy>=1.7.0
+torch>=2.0.0
+torchaudio>=2.0.0
+matplotlib>=3.4.0
+pydub>=0.25.1
+httpx>=0.23.0
+pydantic>=2.0.0
+soundfile>=0.12.1
+
+# Development dependencies
+pytest>=7.0.0
