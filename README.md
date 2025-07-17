@@ -116,7 +116,72 @@ Several example scripts are provided in the `examples` directory:
 - `effects_example.py`: Comprehensive examples of audio effects processing
 - `source_separation_example.py`: Examples of audio source separation
 - `transformation_example.py`: Examples of audio transformations
+- `audio_registry_example.py`: Example of using the Audio Registry system
 - `test_prompts.md`: Example prompts for interacting with the AudioProcessor agent
+
+## Example Commands for the Agent
+
+Here are some example prompts you can try with the AudioProcessor agent, from simple to more complex:
+
+### Basic Analysis
+
+```
+Load my song.mp3 and tell me its tempo, key, and duration.
+```
+
+### Simple Effects
+
+```
+Load guitar.wav and apply some reverb to make it sound like it's in a concert hall.
+```
+
+### Audio Separation
+
+```
+Load my song.mp3, separate the vocals, and save them as vocals.wav.
+```
+
+### Chained Transformations
+
+```
+Load drums.wav, increase the tempo by 10%, add some compression to make them punchier, and save the result.
+```
+
+### Multi-step Processing
+
+```
+Load song.mp3, separate the vocals and drums, apply reverb to the vocals, boost the low-end of the drums, and then mix them back together at equal volumes.
+```
+
+### Creative Audio Manipulation
+
+```
+Load guitar_solo.wav, apply a pitch shifter to transpose it up a fifth, add delay with feedback at 0.4, then apply a phaser effect with a slow rate and save the result as psychedelic_guitar.wav.
+```
+
+### Complex Workflow
+
+```
+Load my band_recording.wav, analyze it to find the tempo and key. Then separate the drums, bass, and other instruments. For the drums, apply compression with a threshold of -20dB and a ratio of 4:1. For the bass, add a slight distortion and some EQ to boost around 80Hz. For the remaining instruments, add a room reverb with medium decay. Finally, mix all processed stems back together with the drums at 90% volume, bass at 100%, and other instruments at 85%, then normalize the mix and save it as processed_band.wav.
+```
+
+### Audio Analysis and Visualization
+
+```
+Load vocals.mp3, create a spectrogram visualization, analyze pitch contours, and identify sections where vibrato is used. Then apply a subtle chorus effect only to those sections.
+```
+
+### DJ-style Transitions
+
+```
+Load track1.mp3 and track2.mp3. Analyze their tempos and keys. Time-stretch track2 to match track1's tempo, then create a 15-second crossfade transition between the end of track1 and the beginning of track2. Apply a high-pass filter sweep during the transition and save the result.
+```
+
+### Complete Production Chain
+
+```
+Load raw_vocals.wav and do the following production chain: first apply a high-pass filter at 100Hz, then add a compressor with threshold -20dB, ratio 3:1, and makeup gain of 2dB. Next add a plate reverb with 1.5 second decay but keep it 80% dry. Finally, apply a de-esser to smooth out any harsh sibilance and save the result as polished_vocals.wav.
+```
 
 ## Project Structure
 
